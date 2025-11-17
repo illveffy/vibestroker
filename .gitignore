@@ -1,1 +1,7 @@
 what-dis.txt
+
+scripts/install_prompt.sh
+
+.vscode/
+.venv/
+__pycache__/

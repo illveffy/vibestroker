@@ -131,26 +131,34 @@ def stop_move_loop(stop_device: bool = True):
 from settings_manager import SettingsManager
 from handy_controller import HandyController
 from llm_service import LLMService
-from audio_service import AudioService
+try:
+    from audio_service import AudioService
+except Exception:
+    AudioService = None
 from background_modes import AutoModeThread, auto_mode_logic, milking_mode_logic, edging_mode_logic, post_orgasm_mode_logic
 
 # ─── INITIALIZATION ───────────────────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
-LLM_URL = "http://127.0.0.1:1234/v1/chat/completions"
+LLM_URL = os.getenv("LLM_URL", "http://127.0.0.1:1234/v1/chat/completions")
 settings = SettingsManager(settings_file_path="my_settings.json")
 settings.load()
 
 handy = HandyController(settings.handy_key)
 handy.update_settings(settings.min_speed, settings.max_speed, settings.min_depth, settings.max_depth)
 
-MODEL_NAME = "nous-hermes-2-mistral-7b-dpo"
+MODEL_NAME = os.getenv("MODEL_NAME", "dolphin-2.9.3-mistral-nemo-12b")
 llm = LLMService(url=LLM_URL, model=MODEL_NAME, provider="lmstudio")
 print(f"🤖 LLM endpoint: {LLM_URL} | model: {MODEL_NAME}")
-audio = AudioService()
-if settings.elevenlabs_api_key:
-    if audio.set_api_key(settings.elevenlabs_api_key):
-        audio.fetch_available_voices()
-        audio.configure_voice(settings.elevenlabs_voice_id, True)
+audio = None
+if AudioService is not None:
+    try:
+        audio = AudioService()
+        if settings.elevenlabs_api_key:
+            if audio.set_api_key(settings.elevenlabs_api_key):
+                audio.fetch_available_voices()
+                audio.configure_voice(settings.elevenlabs_voice_id, True)
+    except Exception:
+        audio = None
 
 # In-Memory State
 chat_history = deque(maxlen=20)
@@ -383,7 +391,11 @@ def add_message_to_queue(text, add_to_history=True):
     if add_to_history:
         clean_text = re.sub(r'<[^>]+>', '', text).strip()
         if clean_text: chat_history.append({"role": "assistant", "content": clean_text})
-    threading.Thread(target=audio.generate_audio_for_text, args=(text,)).start()
+    if audio:
+        try:
+            threading.Thread(target=audio.generate_audio_for_text, args=(text,)).start()
+        except Exception:
+            pass
 
 def start_background_mode(mode_logic, initial_message, mode_name):
     global auto_mode_active_task, edging_start_time
@@ -898,13 +910,18 @@ def nudge_route():
 @app.route('/setup_elevenlabs', methods=['POST'])
 def elevenlabs_setup_route():
     api_key = request.json.get('api_key')
-    if not api_key or not audio.set_api_key(api_key): return jsonify({"status": "error"}), 400
+    if AudioService is None or audio is None:
+        return jsonify({"status": "error", "message": "Audio service unavailable"}), 400
+    if not api_key or not audio.set_api_key(api_key):
+        return jsonify({"status": "error"}), 400
     settings.elevenlabs_api_key = api_key; settings.save()
     return jsonify(audio.fetch_available_voices())
 
 @app.route('/set_elevenlabs_voice', methods=['POST'])
 def set_elevenlabs_voice_route():
     voice_id, enabled = request.json.get('voice_id'), request.json.get('enabled', False)
+    if AudioService is None or audio is None:
+        return jsonify({"status": "error", "message": "Audio service unavailable"}), 400
     ok, message = audio.configure_voice(voice_id, enabled)
     if ok: settings.elevenlabs_voice_id = voice_id; settings.save()
     return jsonify({"status": "ok" if ok else "error", "message": message})
@@ -912,7 +929,7 @@ def set_elevenlabs_voice_route():
 @app.route('/get_updates')
 def get_ui_updates_route():
     messages = [messages_for_ui.popleft() for _ in range(len(messages_for_ui))]
-    if audio_chunk := audio.get_next_audio_chunk():
+    if audio and (audio_chunk := audio.get_next_audio_chunk()):
         return send_file(io.BytesIO(audio_chunk), mimetype='audio/mpeg')
     return jsonify({"messages": messages})
 
